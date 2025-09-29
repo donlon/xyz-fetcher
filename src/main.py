@@ -243,7 +243,7 @@ class Fetcher:
 
     def save_episode_data(self, episode_data: dict):
         podcast = episode_data.pop('podcast', None)
-        episode_data['replyToComment'] = {
+        episode_data['podcast'] = {
             'pid': podcast['pid']
         }
         
