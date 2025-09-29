@@ -261,6 +261,9 @@ class Fetcher:
         author = comment_data.pop('author', None)
         if author:
             self.save_user_data(author)
+            comment_data['author'] = {
+                'uid': author['uid']
+            }
         if 'replies' in comment_data:
             replies = comment_data.pop('replies', [])
             for reply in replies:
