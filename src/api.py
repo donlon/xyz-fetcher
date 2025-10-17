@@ -61,13 +61,15 @@ class ApiHelper:
     @retry(requests.exceptions.ConnectionError, tries=6, delay=15)
     def api_get(self, url: str, headers: dict={}):
         token_refreshed = False
-        while not token_refreshed:
+        while True:
             headers = {
                 **self.get_common_req_header(),
                 **headers,
             }
             r = self.session.get(url, headers=headers)
             if r.status_code == 401:
+                if token_refreshed:
+                    break
                 self.refresh_access_token()
                 token_refreshed = True
                 continue
