@@ -90,7 +90,21 @@ class Fetcher:
         if not db_name:
             raise AppException('database.database_name is not set in config file')
         self.db = self.mongodb[db_name]
-        print('database connected.')
+        self.init_db()
+
+
+    def init_db(self):
+        podcast_col: pymongo.collection.Collection = self.db['podcast']
+        podcast_col.create_index([('__task_id', pymongo.ASCENDING)], name='task_id_index')
+        podcast_col.create_index([('__insert_time', pymongo.ASCENDING)], name='insert_time_index')
+        podcast_col.create_index([('pid', pymongo.ASCENDING)], name='pid_index')
+        # TODO: taskid + pid index
+
+        episode_col: pymongo.collection.Collection = self.db['episode']
+        episode_col.create_index([('__task_id', pymongo.ASCENDING)], name='task_id_index')
+        podcast_col.create_index([('__insert_time', pymongo.ASCENDING)], name='insert_time_index')
+        episode_col.create_index([('eid', pymongo.ASCENDING)], name='eid_index')
+        episode_col.create_index([('pid', pymongo.ASCENDING)], name='pid_index')
 
 
     def load_token_file(self):
