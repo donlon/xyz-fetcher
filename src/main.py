@@ -10,6 +10,7 @@ import pymongo
 import toml
 
 import api
+from config import ConfigFile
 
 class AppException(Exception): ...
 
@@ -17,13 +18,13 @@ class Fetcher:
     def __init__(self):
         self.task_id: str = None
         self.mongodb: pymongo.MongoClient = None
-        self.fetch_episodes: True = None
+        self.fetch_episodes: bool = None
         self.episodes_order: str = None
         self.episodes_max_count: int = None
-        self.fetch_comments: True = None
+        self.fetch_comments: bool = None
         self.comments_max_count_primary: int = None
         self.comments_max_count_thread: int = None
-        self.config: dict = {}
+        self.cfg: ConfigFile = None
         self.token_filename: str = None
         self.device_idfv: str = None
         self.device_id: str = None
@@ -47,10 +48,12 @@ class Fetcher:
         if args.pid:
             if args.eid:
                 raise AppException('invalid combination')
+            print(f'task id: {self.task_id}')
             self.fetch_podcast(args.pid)
         elif args.eid:
             if not args.fetch_episodes:
                 raise AppException('error: --fetch-episode set to false when --eid is set')
+            print(f'task id: {self.task_id}')
             self.fetch_episode(args.eid)
 
         else:
@@ -58,13 +61,12 @@ class Fetcher:
 
 
     def load_config_file(self, filename):
-        with open(filename, 'r', encoding='utf-8') as f:
-            self.config = toml.load(f)
+        self.cfg = ConfigFile(filename)
+        self.cfg.load()
 
-        fetcher_config = self.config.get('fetcher', {})
-        token_filename = fetcher_config.get('token_filename', '')
-        self.device_idfv = fetcher_config.get('device_idfv', '')
-        self.device_id = fetcher_config.get('device_id', '')
+        token_filename = self.cfg.fetcher_token_filename
+        self.device_idfv = self.cfg.fetcher_device_idfv
+        self.device_id = self.cfg.fetcher_device_id
 
         if not token_filename:
             raise AppException('fetcher.token_filename is not set in config file')
@@ -72,21 +74,20 @@ class Fetcher:
         self.token_filename = os.path.join(os.path.dirname(filename), token_filename)
         self.load_token_file()
         
-        database_config: dict = self.config.get('database', {})
         mongo_config = {
-            'host': database_config.get('host'),
-            'port': database_config.get('port'),
+            'host': self.cfg.database_host,
+            'port': self.cfg.database_port,
             'serverSelectionTimeoutMS': 3000
         }
         mongo_config.update({
-            'username': database_config.get('username'),
-            'password': database_config.get('password'),
-            'authSource': database_config.get('auth_source', ''),
+            'username': self.cfg.database_username,
+            'password': self.cfg.database_password,
+            'authSource': self.cfg.database_auth_source,
         })
 
         self.mongodb = pymongo.MongoClient(**mongo_config)
         server_info = self.mongodb.server_info()
-        db_name = database_config.get('database_name')
+        db_name = self.cfg.database_database_name
         if not db_name:
             raise AppException('database.database_name is not set in config file')
         self.db = self.mongodb[db_name]
@@ -144,6 +145,24 @@ class Fetcher:
                                         token_refresh_callback=self.token_refresh_callback)
 
 
+    def fetch_items_paged(self,
+                          fetch_func: Callable[[dict], dict],
+                          max_count):
+        fetched_count = 0
+        load_more_key = None
+        while max_count == 0 or fetched_count < max_count:
+            res = fetch_func(key=load_more_key)
+            # res['totalCount']
+            data = res.get('data', None)
+            if data:
+                for item in data:
+                    yield item
+            fetched_count += len(data)
+            load_more_key = res.get('loadMoreKey')
+            if load_more_key is None:
+                break
+
+
     def fetch_podcast(self, pid):
         print(f'fetching podcast id={pid}')
         res = self.api_helper.get_podcast(pid)
@@ -153,22 +172,18 @@ class Fetcher:
         self.save_podcast_data(podcast_data)
 
         if self.fetch_episodes:
-            episodes = []
-            def fetch_func(load_more_key):
-                return self.api_helper.list_episode(pid, load_more_key=load_more_key)
-            def save_func(data):
-                nonlocal episodes
-                for episode in data:
-                    eid = episode["eid"]
-                    self.save_episode_data(episode)
-                    print(f'fetched episode id={eid}')
-                    print(f'                title={episode["title"]}')
-                    if self.fetch_comments:
-                        self.fetch_episode_comments(eid)
-                    # self.fetch_episode(eid)
-                episodes += data
-            self.fetch_items_paged(fetch_func, save_func, self.episodes_max_count)
-            print(f'  fetched {len(episodes)} episodes')
+            count = 0
+            for episode in self.fetch_items_paged(lambda key: self.api_helper.list_episode(pid, load_more_key=key),
+                                                  self.episodes_max_count):
+                eid = episode["eid"]
+                self.save_episode_data(episode)
+                print(f'fetched episode id={eid}')
+                print(f'                title={episode["title"]}')
+                if self.fetch_comments:
+                    self.fetch_episode_comments(eid)
+                # self.fetch_episode(eid)
+                count += 1
+            print(f'  fetched {count} episodes')
 
 
     def fetch_episode(self, eid):
@@ -184,54 +199,26 @@ class Fetcher:
             self.fetch_episode_comments(eid)
 
 
-    def fetch_items_paged(self,
-                          fetch_func: Callable[[dict], dict],
-                          save_func: Callable[[dict], None],
-                          max_count):
-        fetched_count = 0
-        more_key = None
-        while max_count == 0 or fetched_count < max_count:
-            res = fetch_func(load_more_key=more_key)
-            # res['totalCount']
-            data = res.get('data', None)
-            save_func(data)
-            fetched_count += len(data)
-            more_key = res.get('loadMoreKey')
-            if more_key is None:
-                break
-
-
     def fetch_episode_comments(self, eid):
         print(f'fetching comments for episode id={eid}')
         comments = []
-        def primary_fetch_func(load_more_key):
-            return self.api_helper.list_comment_primary(eid, load_more_key=load_more_key)
-        def primary_save_func(data):
-            nonlocal comments
-            for comment in data:
-                self.save_comment_data(comment)
-            comments += data
-        self.fetch_items_paged(primary_fetch_func, primary_save_func, self.comments_max_count_primary)
+        for comment in self.fetch_items_paged(lambda key: self.api_helper.list_comment_primary(eid, load_more_key=key),
+                                              self.comments_max_count_primary):
+            self.save_comment_data(comment)
+            comments.append(comment)
 
         print(f'  fetched {len(comments)} primary comments')
 
         fetched_thread_comments = 0
         current_comment_id = None
-        def thread_fetch_func(load_more_key):
-            nonlocal current_comment_id
-            return self.api_helper.list_comment_thread(current_comment_id, load_more_key=load_more_key)
-        def thread_save_func(data):
-            nonlocal fetched_thread_comments
-            for comment in data:
-                self.save_comment_data(comment)
-                fetched_thread_comments += 1
 
         for comment in comments:
             current_comment_id = comment.get('id')
             if comment.get('replyCount', 0) > 0:
-                self.fetch_items_paged(thread_fetch_func,
-                                       thread_save_func,
-                                       self.comments_max_count_thread)
+                for comment in self.fetch_items_paged(lambda key: self.api_helper.list_comment_thread(current_comment_id, load_more_key=key),
+                                                      self.comments_max_count_thread):
+                    self.save_comment_data(comment)
+                    fetched_thread_comments += 1
         print(f'  fetched {fetched_thread_comments} thread comments')
 
 
@@ -257,9 +244,10 @@ class Fetcher:
 
     def save_episode_data(self, episode_data: dict):
         podcast = episode_data.pop('podcast', None)
-        episode_data['podcast'] = {
-            'pid': podcast['pid']
-        }
+        # podcast repensent by 'pid' field
+        # episode_data['podcast'] = {
+        #     'pid': podcast['pid']
+        # }
         
         # TODO: drop the following fields:
         # isPlayed

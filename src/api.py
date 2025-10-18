@@ -19,7 +19,7 @@ class ApiHelper:
         self.refresh_token = refresh_token
         self.token_refresh_callback = token_refresh_callback
         
-        self.req_headers = {
+        self.session.headers.update({
             'user-agent': 'Xiaoyuzhou/2.94.0 (build:2749; iOS 18.6.2)',
             'market': 'AppStore',
             'x-jike-device-properties': json.dumps({
@@ -42,8 +42,8 @@ class ApiHelper:
             'app-version': '2.94.0',
             'os-version': '18.6.2',
             'wificonnected': 'true',
-            # 'accept-encoding': 'br;q=1.0, gzip;q=0.9, deflate;q=0.8',
-        }
+            'x-jike-access-token': self.access_token,
+        })
 
 
     @staticmethod
@@ -51,44 +51,15 @@ class ApiHelper:
         return datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
 
 
-    def get_common_req_header(self):
-        return {
-            **self.req_headers,
-            'x-jike-access-token': self.access_token,
-            'local-time': self.get_local_time(),
-        }
-
     @retry(requests.exceptions.ConnectionError, tries=6, delay=15)
-    def api_get(self, url: str, headers: dict={}):
+    def api_request(self, method: str, url: str, **kwargs):
         token_refreshed = False
-        while True:
-            headers = {
-                **self.get_common_req_header(),
-                **headers,
+        while True:        
+            kwargs['headers'] = {
+                'local-time': self.get_local_time(),
+                **kwargs.get('headers', {}),
             }
-            r = self.session.get(url, headers=headers)
-            if r.status_code == 401:
-                if token_refreshed:
-                    break
-                self.refresh_access_token()
-                token_refreshed = True
-                continue
-            elif r.status_code != 200:
-                raise Exception(f'Invalid response status code: {r.status_code}')
-
-            return r.json()
-        raise Exception('Authentication failed')
-
-    @retry(requests.exceptions.ConnectionError, tries=6, delay=15)
-    def api_post(self, url: str, post_data: dict={}):
-        token_refreshed = False
-        post_data = json.dumps(post_data)
-        while True:
-            headers = {
-                **self.get_common_req_header(),
-                'content-type': 'application/json',
-            }
-            r = self.session.post(url, post_data, headers=headers)
+            r = self.session.request(method, url, **kwargs)
             if r.status_code == 401:
                 if token_refreshed:
                     break
@@ -104,7 +75,7 @@ class ApiHelper:
 
     def refresh_access_token(self):
         headers = {
-            **self.get_common_req_header(),
+            'local-time': self.get_local_time(),
             'x-jike-refresh-token': self.refresh_token,
         }
         r = self.session.get('https://api.xiaoyuzhoufm.com/app_auth_tokens.refresh', headers=headers)
@@ -114,14 +85,18 @@ class ApiHelper:
         if res.get('success', False):
             self.access_token = res.get('x-jike-access-token', '')
             self.refresh_token = res.get('x-jike-refresh-token', '')
+            self.session.headers.update({
+                'x-jike-access-token': self.access_token,
+            })
         else:
             raise Exception(f'Failed to refresh access_token: success is not true')
+
         if self.token_refresh_callback is not None:
             self.token_refresh_callback(res)
 
 
     def get_podcast(self, pid):
-        return self.api_get(f'https://api.xiaoyuzhoufm.com/v1/podcast/get?pid={pid}')
+        return self.api_request('GET', f'https://api.xiaoyuzhoufm.com/v1/podcast/get?pid={pid}')
 
 
     def list_episode(self, pid, order='desc', limit=20, load_more_key=None):
@@ -132,12 +107,12 @@ class ApiHelper:
         }
         if load_more_key is not None:
             post_data['loadMoreKey'] = load_more_key
-        res = self.api_post('https://api.xiaoyuzhoufm.com/v1/episode/list', post_data=post_data)
+        res = self.api_request('POST', 'https://api.xiaoyuzhoufm.com/v1/episode/list', json=post_data)
         return res
 
 
     def get_episode(self, eid):
-        return self.api_get(f'https://api.xiaoyuzhoufm.com/v1/episode/get?eid={eid}')
+        return self.api_request('GET', f'https://api.xiaoyuzhoufm.com/v1/episode/get?eid={eid}')
 
 
     def list_comment_primary(self, eid, order='hot', load_more_key=None):
@@ -153,7 +128,7 @@ class ApiHelper:
         }
         if load_more_key is not None:
             post_data['loadMoreKey'] = load_more_key
-        res = self.api_post('https://api.xiaoyuzhoufm.com/v1/comment/list-primary', post_data=post_data)
+        res = self.api_request('POST', 'https://api.xiaoyuzhoufm.com/v1/comment/list-primary', json=post_data)
         return res
 
     def list_comment_thread(self, primary_comment_id, order='smart', load_more_key=None):
@@ -166,5 +141,5 @@ class ApiHelper:
         }
         if load_more_key is not None:
             post_data['loadMoreKey'] = load_more_key
-        res = self.api_post('https://api.xiaoyuzhoufm.com/v1/comment/list-thread', post_data=post_data)
+        res = self.api_request('POST', 'https://api.xiaoyuzhoufm.com/v1/comment/list-thread', json=post_data)
         return res
